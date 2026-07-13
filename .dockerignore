@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+.git/
+.gitignore
+logs/*
+!logs/.gitkeep
+
+# never bake real secrets into the image
+.env
+config/config.yaml
+
+*.md
+.DS_Store

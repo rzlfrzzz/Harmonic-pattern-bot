@@ -1,0 +1,47 @@
+# ==========================================================
+# Harmonic Pattern Bot — Configuration
+# Copy this file to config.yaml and fill in your real values.
+# NEVER commit config.yaml (real secrets) to git.
+# ==========================================================
+
+telegram:
+  bot_token: "PASTE_YOUR_TELEGRAM_BOT_TOKEN_HERE"
+  chat_id: "PASTE_YOUR_CHAT_ID_OR_CHANNEL_ID_HERE"
+
+mexc:
+  rest_base_url: "https://contract.mexc.com"     # MEXC futures REST base
+  ws_url: "wss://contract.mexc.com/edge"          # MEXC futures WebSocket
+  api_key: ""                                     # only needed for private endpoints
+  api_secret: ""
+  request_delay_seconds: 0.3                      # spacing between REST calls (rate-limit safety)
+  max_retries: 3
+
+supabase:
+  # Use the "Connection string" (URI) from Supabase > Project Settings > Database
+  # Example: postgresql://postgres:[email protected]:5432/postgres
+  db_dsn: "postgresql://postgres:[email protected]:5432/postgres"
+
+scan:
+  top_n_coins: 30
+  timeframes: ["5m", "15m", "1h", "4h"]
+  candles_per_fetch: 500          # how many historical candles to backfill per symbol/timeframe
+  min_candles_required: 100       # minimum candles before pattern scan runs
+  rescan_interval_hours: 4        # full pattern re-scan cadence (rate-limit mitigation)
+  swing_method: "zigzag"          # one of: zigzag | fractal | atr_pivot | scipy_peaks
+  zigzag_pct: 3.0                 # % move required to register a new swing (zigzag method)
+  fractal_window: 2               # bars on each side for fractal pivot method
+  atr_period: 14
+  atr_multiplier: 1.5
+  scipy_prominence_atr_mult: 1.0  # prominence for find_peaks, expressed as multiple of ATR
+
+pattern:
+  fib_tolerance: 0.05             # 5% tolerance on all Fibonacci ratio checks
+  min_pattern_score: 65           # only notify if score >= this
+  entry_zone_pct: 0.5             # entry zone = D +/- this % of D
+  sl_buffer_pct: 0.3              # extra buffer beyond X/A extreme for stop loss
+
+logging:
+  level: "INFO"
+  file: "logs/bot.log"
+  max_bytes: 5242880
+  backup_count: 5

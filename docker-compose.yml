@@ -1,0 +1,72 @@
+version: "3.9"
+
+# ==========================================================
+# Harmonic Pattern Telegram Bot — Docker Compose
+#
+# Default setup: bot connects to your remote Supabase Postgres
+# (recommended — matches the SKILL/README setup). Secrets are
+# supplied via a .env file (see .env.example) so nothing sensitive
+# lives in this file or gets baked into the image.
+# ==========================================================
+
+services:
+  harmonic-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: harmonic-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # These override values inside config/config.yaml at runtime.
+      # Leave config/config.yaml with placeholder values and manage
+      # real secrets exclusively through .env (see .env.example).
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      MEXC_API_KEY: ${MEXC_API_KEY:-}
+      MEXC_API_SECRET: ${MEXC_API_SECRET:-}
+      SUPABASE_DB_DSN: ${SUPABASE_DB_DSN}
+    volumes:
+      # Mount config so you can tweak scan/pattern settings without rebuilding
+      - ./config/config.yaml:/app/config/config.yaml:ro
+      # Persist logs on the host
+      - ./logs:/app/logs
+    networks:
+      - harmonic-net
+
+  # ----------------------------------------------------------------
+  # OPTIONAL: local Postgres for development/testing without Supabase.
+  # Not used by default — the bot talks to SUPABASE_DB_DSN. To test
+  # locally instead, set SUPABASE_DB_DSN in .env to:
+  #   postgresql://harmonic:harmonic@local-postgres:5432/harmonic
+  # and uncomment the `depends_on` block below.
+  # ----------------------------------------------------------------
+  local-postgres:
+    image: postgres:16-alpine
+    container_name: harmonic-local-postgres
+    restart: unless-stopped
+    profiles: ["local-db"]        # only starts with: docker compose --profile local-db up
+    environment:
+      POSTGRES_USER: harmonic
+      POSTGRES_PASSWORD: harmonic
+      POSTGRES_DB: harmonic
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - harmonic-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U harmonic"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+networks:
+  harmonic-net:
+    driver: bridge
+
+volumes:
+  pgdata:
