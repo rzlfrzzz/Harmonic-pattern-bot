@@ -173,6 +173,24 @@ def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return tr.rolling(period, min_periods=1).mean()
 
 
+def latest_atr(candles: list[dict], atr_period: int = 14) -> float | None:
+    """
+    Returns the most recent ATR value (absolute price units) for a closed
+    candle series, or None if there isn't enough history yet.
+
+    Exposed so callers outside this module (entry_calculator / main scan
+    loop) can size stop-loss buffers and entry zones to each symbol's
+    actual recent volatility instead of a flat, one-size-fits-all
+    percentage of price — see analysis/entry_calculator.py.
+    """
+    df = _candles_to_df(candles)
+    if len(df) < 2:
+        return None
+    df["atr"] = _atr(df, atr_period)
+    value = df["atr"].iloc[-1]
+    return float(value) if pd.notna(value) else None
+
+
 def atr_pivot_swings(candles: list[dict], atr_period: int = 14, atr_multiplier: float = 1.5) -> list[dict]:
     df = _candles_to_df(candles)
     if len(df) < atr_period + 2:
