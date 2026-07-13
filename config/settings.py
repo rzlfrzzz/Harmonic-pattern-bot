@@ -66,6 +66,7 @@ class ScanConfig:
     atr_period: int
     atr_multiplier: float
     scipy_prominence_atr_mult: float
+    pattern_monitor_interval_seconds: int = 60
 
 
 @dataclass
@@ -74,6 +75,29 @@ class PatternConfig:
     min_pattern_score: int
     entry_zone_pct: float
     sl_buffer_pct: float
+    # --- adaptive (ATR-based) SL/entry sizing -------------------------
+    use_atr_sl: bool = False               # when true, SL buffer = atr * sl_atr_multiplier
+    sl_atr_multiplier: float = 1.5
+    use_atr_entry_zone: bool = False       # when true, entry half-width = atr * entry_zone_atr_multiplier
+    entry_zone_atr_multiplier: float = 0.5
+    # --- risk/reward gate ---------------------------------------------
+    min_risk_reward: float = 1.5           # signals below this TP1-based R:R are dropped
+    # --- D staleness / "is this signal still actionable" checks -------
+    max_candles_since_d: int = 2           # skip signals whose D is this many closed candles old
+    max_entry_deviation_pct: float = 1.0   # skip if price has run this % beyond the entry zone edge
+
+
+@dataclass
+class RiskConfig:
+    account_equity_usdt: float = 1000.0
+    risk_per_trade_pct: float = 1.0
+    max_leverage: float = 5.0
+
+
+@dataclass
+class CircuitBreakerConfig:
+    max_consecutive_failures: int = 5
+    cooldown_minutes: int = 60
 
 
 @dataclass
@@ -92,6 +116,8 @@ class Config:
     scan: ScanConfig
     pattern: PatternConfig
     logging: LoggingConfig
+    risk: RiskConfig
+    circuit_breaker: CircuitBreakerConfig
 
 
 def load_config(path: str | None = None) -> Config:
@@ -123,4 +149,9 @@ def load_config(path: str | None = None) -> Config:
         scan=ScanConfig(**raw["scan"]),
         pattern=PatternConfig(**raw["pattern"]),
         logging=LoggingConfig(**raw["logging"]),
+        # `risk` / `circuit_breaker` are new sections; fall back to their
+        # dataclass defaults so existing config.yaml files written before
+        # this fix still load without edits.
+        risk=RiskConfig(**raw.get("risk", {})),
+        circuit_breaker=CircuitBreakerConfig(**raw.get("circuit_breaker", {})),
     )
