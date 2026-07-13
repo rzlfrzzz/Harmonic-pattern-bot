@@ -107,6 +107,36 @@ File/line references are to the fixed codebase.
   every candle close / gap-fill pass forever. A single success resets the
   counter immediately.
 
+## 8. (Discovered while testing fix #1) Swing points lost timezone-awareness, crashing datetime comparisons
+
+**Symptom:** `Pattern scan failed for <symbol> <tf>: can't compare offset-naive and offset-aware datetimes`
+
+**Root cause:** all four swing-detection methods (`zigzag_swings`,
+`fractal_swings`, `atr_pivot_swings`, `scipy_peaks_swings`) read the candle
+open-time column via `df["open_time"].values` (a numpy array) at some point
+and rebuilt a Python `datetime` from it via `pd.Timestamp(...)`. A numpy
+`datetime64` array carries **no timezone at all**, so every swing point's
+`point_time` silently came out offset-naive — even though every candle going
+in (from `data/mexc_client.py` and `db/database.py` via asyncpg) is always
+UTC-aware. This was a pre-existing latent bug: nothing compared swing-point
+times against candle times before, so it never surfaced until bug fix #1
+added exactly that comparison (`candle["open_time"] > d_time` for the
+`max_candles_since_d` staleness check).
+
+**Fix:** `analysis/swing_detector.py`
+- `_candles_to_df()` now guarantees the `open_time` column is tz-aware
+  (localizes to UTC if it somehow isn't).
+- Every method now extracts timestamps via `df["open_time"].tolist()`
+  (preserves tz-aware `pandas.Timestamp` objects) instead of `.values`
+  (numpy array, tz-stripped).
+- `main.py`'s staleness check also normalizes both sides to naive-UTC
+  before comparing, as defense-in-depth in case some other future data
+  source produces a naive timestamp.
+- Added `tests/test_patterns.py::test_swing_methods_preserve_timezone_awareness`
+  as a permanent regression test (constructs tz-aware candles like
+  production data and asserts every swing method's `point_time` stays
+  tz-aware).
+
 ---
 
 ## Config changes
@@ -132,8 +162,9 @@ Run `db/migrations/001_risk_and_tracking.sql` against an existing database
 
 ## Tests
 
-`tests/test_patterns.py` gained 12 new tests covering ATR-adaptive SL,
+`tests/test_patterns.py` gained 13 new tests covering ATR-adaptive SL,
 the risk/reward gate, position sizing (capped and uncapped), the
-entry-actionability check, the circuit breaker, and pattern-outcome
-transitions (invalidated vs. sl_hit vs. tp1_hit). All 17 tests (5 original +
-12 new) pass.
+entry-actionability check, the circuit breaker, pattern-outcome
+transitions (invalidated vs. sl_hit vs. tp1_hit), and a timezone-awareness
+regression test for all four swing-detection methods. All 18 tests (5
+original + 13 new) pass.

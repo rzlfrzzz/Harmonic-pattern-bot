@@ -44,6 +44,11 @@ from notifier.telegram_bot import TelegramNotifier
 logger = logging.getLogger("harmonic_bot")
 
 
+def _naive_utc(dt):
+    """Strip tzinfo (assumes UTC) so datetimes from different sources compare safely."""
+    return dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
+
+
 def setup_logging(cfg: Config):
     log_path = Path(cfg.logging.file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -280,8 +285,15 @@ class HarmonicBot:
             # entry zone or the stop loss entirely.
             # ------------------------------------------------------------------
             d_time = match["D"]["point_time"]
+            # Defense-in-depth: normalize both sides to naive-UTC before
+            # comparing. The real fix for the "naive vs aware" crash lives
+            # in swing_detector.py (point_time was silently losing its
+            # timezone during a numpy round-trip), but this comparison
+            # stays robust even if some other future swing method or data
+            # source produces a naive timestamp.
+            d_time_naive = _naive_utc(d_time)
             candles_since_d = sum(
-                1 for c in closed_candles if c["open_time"] > d_time
+                1 for c in closed_candles if _naive_utc(c["open_time"]) > d_time_naive
             )
             if candles_since_d > self.cfg.pattern.max_candles_since_d:
                 logger.debug(
