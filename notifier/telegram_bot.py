@@ -32,6 +32,18 @@ def format_signal_message(pattern_row: dict) -> str:
 
     x_line = f"X: {_fmt_price(pattern_row['x_price'])}\n" if pattern_row.get("x_price") is not None else ""
 
+    risk_lines = ""
+    if pattern_row.get("risk_reward_ratio") is not None:
+        risk_lines += f"Risk/Reward (TP1): {float(pattern_row['risk_reward_ratio']):.2f}\n"
+    if pattern_row.get("position_qty") is not None:
+        risk_lines += (
+            f"Suggested Size: {float(pattern_row['position_qty']):.4g} "
+            f"(risking {_fmt_price(float(pattern_row.get('risk_amount') or 0))} USDT"
+        )
+        if pattern_row.get("position_leverage") is not None:
+            risk_lines += f", ~{float(pattern_row['position_leverage']):.2f}x"
+        risk_lines += ")\n"
+
     return (
         f"{emoji} {label} {pattern_row['pattern_name']} Detected\n\n"
         f"Pair: {pattern_row['symbol']}\n"
@@ -46,6 +58,7 @@ def format_signal_message(pattern_row: dict) -> str:
         f"TP1: {_fmt_price(pattern_row['tp1'])}\n"
         f"TP2: {_fmt_price(pattern_row['tp2'])}\n"
         f"TP3: {_fmt_price(pattern_row['tp3'])}\n\n"
+        f"{risk_lines}"
         f"Pattern Score: {pattern_row['pattern_score']}/100\n"
         f"Status: Candle D confirmed"
     )
