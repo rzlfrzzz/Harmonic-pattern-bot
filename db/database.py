@@ -15,6 +15,9 @@ import asyncpg
 
 logger = logging.getLogger("harmonic_bot.db")
 
+# statuses that are considered "resolved" -- see analysis/pattern_tracker.py
+TERMINAL_STATUSES = ("invalidated", "sl_hit", "tp3_hit")
+
 
 class Database:
     def __init__(self, dsn: str):
@@ -119,6 +122,20 @@ class Database:
             )
             return row["open_time"] if row else None
 
+    async def get_latest_closed_candle(self, symbol: str, timeframe: str) -> dict | None:
+        """Used by analysis/pattern_tracker.py to evaluate open patterns against current price."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                select open_time, open, high, low, close, volume
+                from candles
+                where symbol = $1 and timeframe = $2 and is_closed = true
+                order by open_time desc limit 1
+                """,
+                symbol, timeframe,
+            )
+            return dict(row) if row else None
+
     # ------------------------------------------------------------------
     # swing points
     # ------------------------------------------------------------------
@@ -157,10 +174,13 @@ class Database:
                     x_time, a_time, b_time, c_time, d_time,
                     x_price, a_price, b_price, c_price, d_price,
                     entry_zone_low, entry_zone_high, stop_loss, tp1, tp2, tp3,
+                    atr_at_signal, risk_reward_ratio, risk_amount, position_qty, position_leverage,
                     pattern_score
                 ) values (
                     $1,$2,$3,$4, $5,$6,$7,$8,$9, $10,$11,$12,$13,$14,
-                    $15,$16,$17,$18,$19,$20, $21
+                    $15,$16,$17,$18,$19,$20,
+                    $21,$22,$23,$24,$25,
+                    $26
                 )
                 on conflict (symbol, timeframe, pattern_name, direction, d_time) do nothing
                 returning id
@@ -169,6 +189,8 @@ class Database:
                 p["x_time"], p["a_time"], p["b_time"], p["c_time"], p["d_time"],
                 p["x_price"], p["a_price"], p["b_price"], p["c_price"], p["d_price"],
                 p["entry_zone_low"], p["entry_zone_high"], p["stop_loss"], p["tp1"], p["tp2"], p["tp3"],
+                p.get("atr_at_signal"), p.get("risk_reward_ratio"), p.get("risk_amount"),
+                p.get("position_qty"), p.get("position_leverage"),
                 p["pattern_score"],
             )
             return result is not None
@@ -183,6 +205,46 @@ class Database:
             await conn.execute(
                 "update detected_patterns set notified = true, notified_at = now() where id = $1",
                 pattern_id,
+            )
+
+    # ------------------------------------------------------------------
+    # pattern outcome tracking (status: confirmed -> entered/invalidated
+    # -> tp1_hit/tp2_hit/tp3_hit/sl_hit). See analysis/pattern_tracker.py.
+    # ------------------------------------------------------------------
+    async def get_open_patterns(self, symbol: str | None = None) -> list[dict]:
+        """All patterns not yet in a terminal status, oldest first."""
+        query = """
+            select * from detected_patterns
+            where status not in ('invalidated', 'sl_hit', 'tp3_hit')
+        """
+        params: list = []
+        if symbol is not None:
+            query += " and symbol = $1"
+            params.append(symbol)
+        query += " order by detected_at asc"
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+            return [dict(r) for r in rows]
+
+    async def mark_pattern_entered(self, pattern_id):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "update detected_patterns set entered = true where id = $1 and entered = false",
+                pattern_id,
+            )
+
+    async def update_pattern_status(self, pattern_id, status: str, entered: bool | None = None):
+        is_terminal = status in TERMINAL_STATUSES
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                update detected_patterns
+                set status = $2,
+                    entered = coalesce($3, entered),
+                    closed_at = case when $4 then now() else closed_at end
+                where id = $1
+                """,
+                pattern_id, status, entered, is_terminal,
             )
 
     # ------------------------------------------------------------------

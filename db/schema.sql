@@ -89,9 +89,22 @@ create table if not exists detected_patterns (
     tp2             numeric not null,
     tp3             numeric not null,
 
+    -- risk management (see analysis/entry_calculator.py)
+    atr_at_signal       numeric,             -- ATR value used for adaptive SL/entry sizing, if any
+    risk_reward_ratio   numeric,             -- reward(TP1) / risk(SL) at the entry-zone midpoint
+    risk_amount         numeric,             -- $ risked at configured risk_per_trade_pct
+    position_qty        numeric,             -- suggested position size (base-asset units)
+    position_leverage   numeric,             -- leverage implied by position_qty at entry price
+
     pattern_score   numeric not null check (pattern_score >= 0 and pattern_score <= 100),
     status          text not null default 'confirmed'
                         check (status in ('confirmed', 'invalidated', 'tp1_hit', 'tp2_hit', 'tp3_hit', 'sl_hit')),
+    -- true once price has actually traded inside the entry zone; used to
+    -- distinguish "stopped out after a real fill" (sl_hit) from "never
+    -- filled before running to the stop level" (invalidated) -- see
+    -- analysis/pattern_tracker.py.
+    entered         boolean not null default false,
+    closed_at       timestamptz,             -- set when status reaches a terminal value
 
     notified        boolean not null default false,
     notified_at     timestamptz,
@@ -109,6 +122,11 @@ create index if not exists idx_patterns_notified
 
 create index if not exists idx_patterns_status
     on detected_patterns (status);
+
+-- speeds up analysis/pattern_tracker.py's "all still-open patterns" scan
+create index if not exists idx_patterns_open
+    on detected_patterns (symbol, timeframe)
+    where status not in ('invalidated', 'sl_hit', 'tp3_hit');
 
 -- ----------------------------------------------------------
 -- scan_log: bookkeeping so we respect the 4h rescan cadence
