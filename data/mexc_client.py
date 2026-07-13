@@ -151,6 +151,7 @@ class MexcClient:
         symbols: list[str],
         timeframes: list[str],
         on_candle_close: Callable[[str, str, dict], "asyncio.Future"],
+        app_ping_interval: float = 15.0,
     ):
         """
         Subscribes to kline channels for every (symbol, timeframe) pair and
@@ -158,12 +159,23 @@ class MexcClient:
         The caller (candle_cache) is responsible for deciding when a bucket
         rollover means the previous candle is now closed.
 
+        IMPORTANT: MEXC's contract WebSocket does not answer standard
+        WebSocket protocol-level ping frames. It requires an
+        application-level `{"method": "ping"}` JSON message sent at least
+        every ~20s, and replies with `{"channel": "pong", ...}` (falling
+        back to `{"method": "pong"}` on some gateway versions). If you
+        rely on the `websockets` library's built-in ping_interval instead,
+        the server never responds to those protocol pings and the client
+        will disconnect with a "keepalive ping timeout" every ~45s. So we
+        disable the library's protocol-level ping entirely (ping_interval=
+        None) and run our own application-level ping loop instead.
+
         Reconnects automatically with exponential backoff on drop.
         """
         backoff = 1
         while True:
             try:
-                async with websockets.connect(self.ws_url, ping_interval=15, ping_timeout=10) as ws:
+                async with websockets.connect(self.ws_url, ping_interval=None) as ws:
                     logger.info("MEXC WebSocket connected.")
                     backoff = 1
                     for symbol in symbols:
@@ -175,30 +187,57 @@ class MexcClient:
                             await ws.send(json.dumps(sub))
                             await asyncio.sleep(0.05)  # gentle subscribe pacing
 
-                    async for raw in ws:
-                        msg = json.loads(raw)
-                        if msg.get("channel") != "push.kline":
-                            continue
-                        data = msg.get("data", {})
-                        symbol = msg.get("symbol") or data.get("symbol")
-                        interval = data.get("interval")
-                        tf = next((k for k, v in TF_MAP.items() if v == interval), None)
-                        if tf is None or symbol is None:
-                            continue
+                    ping_task = asyncio.create_task(self._app_ping_loop(ws, app_ping_interval))
+                    try:
+                        async for raw in ws:
+                            msg = json.loads(raw)
+                            channel = msg.get("channel")
 
-                        bucket_t = int(data.get("t") or data.get("time") or 0)
-                        candle = {
-                            "open_time": datetime.fromtimestamp(bucket_t, tz=timezone.utc),
-                            "open": float(data["o"]),
-                            "high": float(data["h"]),
-                            "low": float(data["l"]),
-                            "close": float(data["c"]),
-                            "volume": float(data.get("v", 0)),
-                            "is_closed": False,
-                        }
-                        await on_candle_close(symbol, tf, candle)
+                            if channel in ("pong", "rs.error") or msg.get("method") == "pong":
+                                # heartbeat ack or subscription error notice; nothing to process
+                                if channel == "rs.error":
+                                    logger.warning(f"MEXC WS error message: {msg}")
+                                continue
+
+                            if channel != "push.kline":
+                                continue
+
+                            data = msg.get("data", {})
+                            symbol = msg.get("symbol") or data.get("symbol")
+                            interval = data.get("interval")
+                            tf = next((k for k, v in TF_MAP.items() if v == interval), None)
+                            if tf is None or symbol is None:
+                                continue
+
+                            bucket_t = int(data.get("t") or data.get("time") or 0)
+                            candle = {
+                                "open_time": datetime.fromtimestamp(bucket_t, tz=timezone.utc),
+                                "open": float(data["o"]),
+                                "high": float(data["h"]),
+                                "low": float(data["l"]),
+                                "close": float(data["c"]),
+                                "volume": float(data.get("v", 0)),
+                                "is_closed": False,
+                            }
+                            await on_candle_close(symbol, tf, candle)
+                    finally:
+                        ping_task.cancel()
+                        try:
+                            await ping_task
+                        except asyncio.CancelledError:
+                            pass
 
             except (websockets.ConnectionClosed, OSError, asyncio.TimeoutError) as e:
                 logger.warning(f"MEXC WebSocket disconnected ({e}); reconnecting in {backoff}s")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
+
+    @staticmethod
+    async def _app_ping_loop(ws, interval: float):
+        """Sends MEXC's required application-level ping to keep the connection alive."""
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                await ws.send(json.dumps({"method": "ping"}))
+        except (websockets.ConnectionClosed, asyncio.CancelledError):
+            pass
