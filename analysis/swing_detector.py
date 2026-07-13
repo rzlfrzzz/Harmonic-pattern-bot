@@ -31,6 +31,23 @@ from scipy.signal import find_peaks
 def _candles_to_df(candles: list[dict]) -> pd.DataFrame:
     df = pd.DataFrame(candles)
     df["open_time"] = pd.to_datetime(df["open_time"])
+    # BUG FIX: every swing method below used to read `df["open_time"].values`
+    # (a numpy datetime64 array) and rebuild a Python datetime from it via
+    # `pd.Timestamp(...)`. numpy datetime64 arrays carry no timezone at
+    # all, so that round-trip silently produced a *naive* datetime even
+    # when every input candle had a proper UTC-aware `open_time` (as they
+    # always do -- see data/mexc_client.py, db/database.py). Every
+    # detected swing point's `point_time` therefore ended up
+    # offset-naive, which blows up the moment it's compared against an
+    # offset-aware DB timestamp (e.g. `candle["open_time"] > d_time` in
+    # main.py's staleness check) with "can't compare offset-naive and
+    # offset-aware datetimes".
+    #
+    # If the input somehow arrives naive, assume UTC (matches how every
+    # other part of this codebase treats timestamps) rather than leaving
+    # it ambiguous.
+    if df["open_time"].dt.tz is None:
+        df["open_time"] = df["open_time"].dt.tz_localize("UTC")
     return df.reset_index(drop=True)
 
 
@@ -61,7 +78,7 @@ def zigzag_swings(candles: list[dict], pct_threshold: float = 3.0) -> list[dict]
         return []
 
     highs, lows = df["high"].values, df["low"].values
-    times = df["open_time"].values
+    times = df["open_time"].tolist()  # tz-aware Timestamps preserved (see _candles_to_df note)
 
     points = []
     trend = None  # 'up' or 'down'
@@ -133,13 +150,14 @@ def zigzag_swings(candles: list[dict], pct_threshold: float = 3.0) -> list[dict]
 def fractal_swings(candles: list[dict], window: int = 2) -> list[dict]:
     df = _candles_to_df(candles)
     n = len(df)
+    times = df["open_time"].tolist()  # tz-aware Timestamps preserved (see _candles_to_df note)
     points = []
     for i in range(window, n - window):
         window_highs = df["high"].values[i - window:i + window + 1]
         window_lows = df["low"].values[i - window:i + window + 1]
         if df["high"].values[i] == window_highs.max() and (window_highs == window_highs.max()).sum() == 1:
             points.append({
-                "point_time": df["open_time"].values[i],
+                "point_time": times[i],
                 "price": float(df["high"].values[i]),
                 "point_type": "high",
                 "candle_index": i,
@@ -147,7 +165,7 @@ def fractal_swings(candles: list[dict], window: int = 2) -> list[dict]:
             })
         if df["low"].values[i] == window_lows.min() and (window_lows == window_lows.min()).sum() == 1:
             points.append({
-                "point_time": df["open_time"].values[i],
+                "point_time": times[i],
                 "price": float(df["low"].values[i]),
                 "point_type": "low",
                 "candle_index": i,
@@ -231,10 +249,11 @@ def scipy_peaks_swings(candles: list[dict], prominence_atr_mult: float = 1.0, at
     high_peaks, _ = find_peaks(df["high"].values, prominence=prominence)
     low_peaks, _ = find_peaks(-df["low"].values, prominence=prominence)
 
+    times = df["open_time"].tolist()  # tz-aware Timestamps preserved (see _candles_to_df note)
     points = []
     for i in high_peaks:
         points.append({
-            "point_time": pd.Timestamp(df["open_time"].values[i]).to_pydatetime(),
+            "point_time": pd.Timestamp(times[i]).to_pydatetime(),
             "price": float(df["high"].values[i]),
             "point_type": "high",
             "candle_index": int(i),
@@ -242,7 +261,7 @@ def scipy_peaks_swings(candles: list[dict], prominence_atr_mult: float = 1.0, at
         })
     for i in low_peaks:
         points.append({
-            "point_time": pd.Timestamp(df["open_time"].values[i]).to_pydatetime(),
+            "point_time": pd.Timestamp(times[i]).to_pydatetime(),
             "price": float(df["low"].values[i]),
             "point_type": "low",
             "candle_index": int(i),
