@@ -7,8 +7,19 @@ validation. Four interchangeable methods are provided; pick one via
 config `scan.swing_method`.
 
 All methods return a list of dicts, oldest-first:
-    [{"point_time": datetime, "price": float, "point_type": "high"|"low", "candle_index": int}, ...]
+    [{"point_time": datetime, "price": float, "point_type": "high"|"low",
+      "candle_index": int, "confirmed": bool}, ...]
 guaranteed to strictly alternate high/low/high/low...
+
+"confirmed" is True for a swing point that cannot change as new candles
+arrive, and False for a trailing pivot that is still provisional (price
+could keep extending it before it locks in). Only `zigzag_swings` produces
+unconfirmed points today (see the trailing pivot appended at the end of
+that function) — the other methods only ever emit a point once its
+surrounding window has fully closed, so they are always confirmed.
+Consumers (see pattern_validator.scan_for_patterns) must not use an
+unconfirmed point as D, since the pattern could silently invalidate itself
+on the next candle after a signal has already been sent.
 """
 from __future__ import annotations
 
@@ -80,6 +91,7 @@ def zigzag_swings(candles: list[dict], pct_threshold: float = 3.0) -> list[dict]
                         "price": float(last_pivot_price),
                         "point_type": "high",
                         "candle_index": int(last_pivot_idx),
+                        "confirmed": True,
                     })
                     trend = "down"
                     last_pivot_idx, last_pivot_price = i, lows[i]
@@ -94,16 +106,22 @@ def zigzag_swings(candles: list[dict], pct_threshold: float = 3.0) -> list[dict]
                         "price": float(last_pivot_price),
                         "point_type": "low",
                         "candle_index": int(last_pivot_idx),
+                        "confirmed": True,
                     })
                     trend = "up"
                     last_pivot_idx, last_pivot_price = i, highs[i]
 
-    # append the trailing, still-forming pivot so the most recent swing is available
+    # append the trailing, still-forming pivot so the most recent swing is
+    # available to callers -- but it is NOT confirmed: price could keep
+    # extending in the same direction on the next candle, which would move
+    # this point rather than lock it in. Callers must not treat this as a
+    # final D.
     points.append({
         "point_time": pd.Timestamp(times[last_pivot_idx]).to_pydatetime(),
         "price": float(last_pivot_price),
         "point_type": "high" if trend == "up" else "low",
         "candle_index": int(last_pivot_idx),
+        "confirmed": False,
     })
 
     return _enforce_alternation(points)
@@ -125,6 +143,7 @@ def fractal_swings(candles: list[dict], window: int = 2) -> list[dict]:
                 "price": float(df["high"].values[i]),
                 "point_type": "high",
                 "candle_index": i,
+                "confirmed": True,
             })
         if df["low"].values[i] == window_lows.min() and (window_lows == window_lows.min()).sum() == 1:
             points.append({
@@ -132,6 +151,7 @@ def fractal_swings(candles: list[dict], window: int = 2) -> list[dict]:
                 "price": float(df["low"].values[i]),
                 "point_type": "low",
                 "candle_index": i,
+                "confirmed": True,
             })
     points.sort(key=lambda p: p["candle_index"])
     for p in points:
@@ -200,6 +220,7 @@ def scipy_peaks_swings(candles: list[dict], prominence_atr_mult: float = 1.0, at
             "price": float(df["high"].values[i]),
             "point_type": "high",
             "candle_index": int(i),
+            "confirmed": True,
         })
     for i in low_peaks:
         points.append({
@@ -207,6 +228,7 @@ def scipy_peaks_swings(candles: list[dict], prominence_atr_mult: float = 1.0, at
             "price": float(df["low"].values[i]),
             "point_type": "low",
             "candle_index": int(i),
+            "confirmed": True,
         })
     points.sort(key=lambda p: p["candle_index"])
     return _enforce_alternation(points)
