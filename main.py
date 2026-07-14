@@ -231,7 +231,7 @@ class HarmonicBot:
         Respects the rescan_interval_hours cadence to avoid hammering MEXC /
         re-scanning more often than the strategy calls for.
         """
-        should_scan = await self.db.should_rescan(symbol, timeframe, self.cfg.scan.rescan_interval_hours)
+        should_scan = await self.db.should_rescan(symbol, timeframe, self.cfg.scan.rescan_hours_for(timeframe))
         if not should_scan:
             return
 
@@ -268,7 +268,15 @@ class HarmonicBot:
             swings, tolerance=self.cfg.pattern.fib_tolerance, min_score=self.cfg.pattern.min_pattern_score
         )
         if not matches:
+            logger.debug(f"{symbol} {timeframe}: no pattern candidates matched this scan.")
             return
+
+        # Visible at INFO (not DEBUG) on purpose: this is the single most
+        # useful line for diagnosing "I see patterns on the chart but the
+        # bot sends nothing" -- it proves candidates ARE being found, so
+        # the answer lies in the per-candidate skip reasons logged below,
+        # not in pattern detection itself.
+        logger.info(f"{symbol} {timeframe}: {len(matches)} raw pattern candidate(s) found this scan.")
 
         # Current market price = close of the most recent closed candle.
         # Used below both to reject stale/blown-through signals (bug #1)
@@ -276,6 +284,7 @@ class HarmonicBot:
         current_price = closed_candles[-1]["close"]
         atr_value = latest_atr(closed_candles, atr_period=self.cfg.scan.atr_period)
 
+        inserted_count = 0
         for match in matches:
             # ------------------------------------------------------------------
             # BUG FIX #1: validate that D is still realistic vs. current price.
@@ -296,7 +305,15 @@ class HarmonicBot:
                 1 for c in closed_candles if _naive_utc(c["open_time"]) > d_time_naive
             )
             if candles_since_d > self.cfg.pattern.max_candles_since_d:
-                logger.debug(
+                # Logged at INFO (was DEBUG): this is one of the two most
+                # common reasons a visually-obvious pattern never becomes a
+                # signal, so it needs to be visible without turning on
+                # debug logging. If you're seeing this a lot on a fast
+                # timeframe (5m/15m), check `scan.rescan_interval_hours` --
+                # a coarse cadence there directly causes this rejection by
+                # letting D age past `pattern.max_candles_since_d` before
+                # the bot ever gets around to looking at it.
+                logger.info(
                     f"Skipping stale {symbol} {timeframe} {match['pattern_name']}: "
                     f"D is {candles_since_d} closed candles old (max {self.cfg.pattern.max_candles_since_d})."
                 )
@@ -334,7 +351,13 @@ class HarmonicBot:
                 continue
 
             if not meets_min_risk_reward(levels, self.cfg.pattern.min_risk_reward):
-                logger.debug(
+                # Also logged at INFO (was DEBUG) -- the other most common
+                # silent-skip reason. If most/all candidates die here,
+                # `pattern.min_risk_reward` is likely set higher than what
+                # this pattern geometry/config typically produces (shallow
+                # patterns like Gartley/Bat naturally have lower TP1-based
+                # R:R than deep ones like Crab) -- consider lowering it.
+                logger.info(
                     f"Skipping {symbol} {timeframe} {match['pattern_name']}: "
                     f"risk/reward {levels['risk_reward_ratio']} < {self.cfg.pattern.min_risk_reward}"
                 )
@@ -373,10 +396,17 @@ class HarmonicBot:
             }
             inserted = await self.db.insert_pattern(row)
             if inserted:
+                inserted_count += 1
                 logger.info(
                     f"New pattern: {symbol} {timeframe} {match['pattern_name']} "
                     f"score={match['pattern_score']} rr={levels['risk_reward_ratio']}"
                 )
+
+        if inserted_count == 0:
+            logger.info(
+                f"{symbol} {timeframe}: {len(matches)} candidate(s) found, "
+                f"0 survived the staleness/actionability/risk-reward filters above."
+            )
 
 
 async def main():
