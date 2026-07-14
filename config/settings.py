@@ -59,7 +59,20 @@ class ScanConfig:
     timeframes: list
     candles_per_fetch: int
     min_candles_required: int
-    rescan_interval_hours: int
+    # BUG FIX: this used to be a single number applied to every timeframe
+    # uniformly. Combined with `pattern.max_candles_since_d` (the D
+    # staleness filter), a coarse global cadence (e.g. 4h) silently killed
+    # *every* signal on fast timeframes: the bot would only actually
+    # re-scan a 5m/15m symbol once every 4 hours, by which point the D it
+    # found was already dozens of candles old and got rejected as stale --
+    # while nothing ever logged as an ERROR, since rejection is a normal,
+    # expected outcome of the staleness filter. Now accepts EITHER a
+    # single number (applied to all timeframes, old behavior, still
+    # supported for backward compatibility) OR a dict keyed by timeframe
+    # (e.g. {"5m": 0.1, "15m": 0.25, "1h": 1, "4h": 4}) so the cadence can
+    # actually match each timeframe's candle duration. See
+    # `rescan_hours_for()`.
+    rescan_interval_hours: "int | float | dict"
     swing_method: str
     zigzag_pct: float
     fractal_window: int
@@ -67,6 +80,17 @@ class ScanConfig:
     atr_multiplier: float
     scipy_prominence_atr_mult: float
     pattern_monitor_interval_seconds: int = 60
+
+    def rescan_hours_for(self, timeframe: str) -> float:
+        if isinstance(self.rescan_interval_hours, dict):
+            if timeframe in self.rescan_interval_hours:
+                return float(self.rescan_interval_hours[timeframe])
+            raise KeyError(
+                f"scan.rescan_interval_hours is a mapping but has no entry for timeframe "
+                f"'{timeframe}'. Add one (e.g. \"{timeframe}\": 0.25) or use a single number "
+                f"to apply the same cadence to every timeframe."
+            )
+        return float(self.rescan_interval_hours)
 
 
 @dataclass

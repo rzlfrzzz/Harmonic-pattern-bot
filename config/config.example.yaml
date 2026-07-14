@@ -26,7 +26,20 @@ scan:
   timeframes: ["5m", "15m", "1h", "4h"]
   candles_per_fetch: 500          # how many historical candles to backfill per symbol/timeframe
   min_candles_required: 100       # minimum candles before pattern scan runs
-  rescan_interval_hours: 4        # full pattern re-scan cadence (rate-limit mitigation)
+  # How often each timeframe is actually re-scanned for patterns. Can be a
+  # single number (applied to every timeframe, old behavior) OR a mapping
+  # per timeframe like below (recommended). IMPORTANT: this interacts with
+  # `pattern.max_candles_since_d` below -- if a timeframe's cadence here is
+  # much coarser than its own candle duration, D will routinely be older
+  # than `max_candles_since_d` by the time the scan runs, and every signal
+  # on that timeframe will be silently rejected as stale (visible as an
+  # INFO "Skipping stale ..." log line, not an error). As a rule of thumb,
+  # keep this at or below ~1 candle's duration for each timeframe.
+  rescan_interval_hours:
+    5m: 0.1     # ~6 minutes -> scans on (almost) every 5m close
+    15m: 0.25   # ~15 minutes -> scans on (almost) every 15m close
+    1h: 1
+    4h: 4
   swing_method: "zigzag"          # one of: zigzag | fractal | atr_pivot | scipy_peaks
   zigzag_pct: 3.0                 # % move required to register a new swing (zigzag method)
   fractal_window: 2               # bars on each side for fractal pivot method
