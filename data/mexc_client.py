@@ -54,6 +54,13 @@ class MexcClient:
         self.request_delay = request_delay
         self.max_retries = max_retries
         self._session: aiohttp.ClientSession | None = None
+        # live-subscription bookkeeping so update_symbols() can push
+        # changes to whatever connection watch_klines currently holds,
+        # and so a reconnect resubscribes to the *current* set, not the
+        # symbol list watch_klines happened to be called with at startup.
+        self._ws = None
+        self._subscribed_symbols: set[str] = set()
+        self._timeframes: list[str] = []
 
     async def __aenter__(self):
         self._session = aiohttp.ClientSession()
@@ -172,14 +179,21 @@ class MexcClient:
 
         Reconnects automatically with exponential backoff on drop.
         """
+        self._timeframes = timeframes
+        self._subscribed_symbols = set(symbols)
+
         backoff = 1
         while True:
             try:
                 async with websockets.connect(self.ws_url, ping_interval=None) as ws:
                     logger.info("MEXC WebSocket connected.")
                     backoff = 1
-                    for symbol in symbols:
-                        for tf in timeframes:
+                    self._ws = ws
+                    # resubscribe to whatever the current symbol set is
+                    # (update_symbols() may have changed it since the last
+                    # connection), not the stale `symbols` argument.
+                    for symbol in self._subscribed_symbols:
+                        for tf in self._timeframes:
                             sub = {
                                 "method": "sub.kline",
                                 "param": {"symbol": symbol, "interval": TF_MAP[tf]},
@@ -221,6 +235,7 @@ class MexcClient:
                             }
                             await on_candle_close(symbol, tf, candle)
                     finally:
+                        self._ws = None
                         ping_task.cancel()
                         try:
                             await ping_task
@@ -231,6 +246,38 @@ class MexcClient:
                 logger.warning(f"MEXC WebSocket disconnected ({e}); reconnecting in {backoff}s")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
+
+    async def update_symbols(self, symbols: list[str], timeframes: list[str] | None = None):
+        """
+        Called by the housekeeping loop whenever the top-N universe
+        changes. Diffs against the currently-subscribed set: newly-added
+        symbols get subscribed on the live connection immediately (if one
+        is up -- otherwise they'll be picked up on the next reconnect,
+        since watch_klines always resubscribes from `_subscribed_symbols`).
+        Dropped symbols are unsubscribed so we stop streaming/scanning
+        coins that fell out of the top-N.
+        """
+        tfs = timeframes or self._timeframes
+        new_set = set(symbols)
+        added = new_set - self._subscribed_symbols
+        removed = self._subscribed_symbols - new_set
+
+        if self._ws is not None:
+            for symbol in added:
+                for tf in tfs:
+                    sub = {"method": "sub.kline", "param": {"symbol": symbol, "interval": TF_MAP[tf]}}
+                    await self._ws.send(json.dumps(sub))
+                    await asyncio.sleep(0.05)
+            for symbol in removed:
+                for tf in tfs:
+                    unsub = {"method": "unsub.kline", "param": {"symbol": symbol, "interval": TF_MAP[tf]}}
+                    await self._ws.send(json.dumps(unsub))
+                    await asyncio.sleep(0.05)
+
+        self._subscribed_symbols = new_set
+        self._timeframes = tfs
+        if added or removed:
+            logger.info(f"WS subscription updated: +{len(added)} -{len(removed)} symbols.")
 
     @staticmethod
     async def _app_ping_loop(ws, interval: float):
