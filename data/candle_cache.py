@@ -44,13 +44,33 @@ class CandleCache:
                 except Exception as e:
                     logger.error(f"Backfill failed for {symbol} {tf}: {e}")
 
-    async def refill_gaps(self, symbols: list[str]):
-        """Lightweight periodic top-up in case the WebSocket missed anything."""
+    async def refill_gaps(self, symbols: list[str], on_close: OnCloseCallback | None = None):
+        """
+        Lightweight periodic top-up in case the WebSocket missed anything.
+
+        If `on_close` is given, any freshly-closed candle we hadn't seen
+        before (i.e. its open_time is newer than what we already tracked
+        for that symbol/timeframe) fires the callback too, so a WS drop
+        doesn't silently stop that symbol/timeframe from being re-scanned.
+        """
         for symbol in symbols:
             for tf in self.timeframes:
                 try:
                     candles = await self.mexc.get_klines(symbol, tf, limit=5)
                     await self.db.upsert_candles(symbol, tf, candles)
+
+                    if on_close is not None and candles:
+                        key = (symbol, tf)
+                        prev_open_time = self._last_open_time.get(key)
+                        closed_candles = [c for c in candles if c["is_closed"]]
+                        newly_closed = [
+                            c for c in closed_candles
+                            if prev_open_time is None or int(c["open_time"].timestamp()) > prev_open_time
+                        ]
+                        if newly_closed:
+                            latest = max(int(c["open_time"].timestamp()) for c in newly_closed)
+                            self._last_open_time[key] = latest
+                            await on_close(symbol, tf)
                 except Exception as e:
                     logger.warning(f"Gap refill failed for {symbol} {tf}: {e}")
 
